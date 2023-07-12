@@ -12,7 +12,7 @@ import os.path
 import re
 from abc import abstractmethod
 from types import ModuleType
-from typing import Any, Final, Iterable, Mapping
+from typing import Any, Final, Iterable, Mapping, List, Literal
 
 from mypy.moduleinspect import is_c_module
 from mypy.stubdoc import (
@@ -119,6 +119,7 @@ class DocstringSignatureGenerator(SignatureGenerator):
         inferred = infer_sig_from_docstring(docstr, name)
         if inferred:
             assert docstr is not None
+            inferred = [inf._replace(docstring=docstr) for inf in inferred]
             if is_pybind11_overloaded_function_docstring(docstr, name):
                 # Remove pybind11 umbrella (*args, **kwargs) for overloaded functions
                 del inferred[-1]
@@ -306,6 +307,18 @@ def is_c_type(obj: object) -> bool:
 def is_pybind11_overloaded_function_docstring(docstr: str, name: str) -> bool:
     return docstr.startswith(f"{name}(*args, **kwargs)\n" + "Overloaded function.\n\n")
 
+def convert_docstring_to_comment(docstring: str, comment_type: Literal["quote", "hash"] = "quote", indent: bool = True) -> List[str]:
+    lines = docstring.strip("\n").split("\n")
+    if comment_type == "quote":
+        ret = ["\"\"\""] + lines + ["\"\"\""]
+        indent_str = "    " if indent else ""
+
+        return [indent_str + r for r in ret]
+    elif comment_type == "hash":
+
+        return ["#" + l for l in lines]
+    
+    raise RuntimeError("comment_type must be 'quote' or 'hash'. Got: " + str(comment_type))
 
 def generate_c_function_stub(
     module: ModuleType,
@@ -380,12 +393,17 @@ def generate_c_function_stub(
             if class_name and signature.args and signature.args[0].name == "cls":
                 output.append("@classmethod")
             output.append(
-                "def {function}({args}) -> {ret}: ...".format(
+                "def {function}({args}) -> {ret}:".format(
                     function=name,
                     args=", ".join(args),
                     ret=strip_or_import(signature.ret_type, module, known_modules, imports),
                 )
             )
+            if signature.name == "project":
+                a = 10
+            if signature.docstring != "":
+                output.extend(convert_docstring_to_comment(signature.docstring))
+            output.append("    ...")
 
 
 def strip_or_import(
@@ -464,25 +482,34 @@ def generate_c_property_stub(
         else:
             return None
 
-    inferred = infer_prop_type(getattr(obj, "__doc__", None))
+    docstring = getattr(obj, "__doc__", None)
+    inferred = infer_prop_type(docstring)
     if not inferred:
         fget = getattr(obj, "fget", None)
-        inferred = infer_prop_type(getattr(fget, "__doc__", None))
+        docstring = getattr(fget, "__doc__", None)
+        inferred = infer_prop_type(docstring)
     if not inferred:
         inferred = "Any"
 
     if module is not None and imports is not None and known_modules is not None:
         inferred = strip_or_import(inferred, module, known_modules, imports)
 
+    docs = []
+    if docstring is not None:
+        docs = convert_docstring_to_comment(docstring, indent=False)
+
     if is_static_property(obj):
         trailing_comment = "  # read-only" if readonly else ""
         static_properties.append(f"{name}: ClassVar[{inferred}] = ...{trailing_comment}")
+        static_properties.extend(docs)
     else:  # regular property
         if readonly:
             ro_properties.append("@property")
             ro_properties.append(f"def {name}(self) -> {inferred}: ...")
+            ro_properties.extend(docs)
         else:
             rw_properties.append(f"{name}: {inferred}")
+            rw_properties.extend(docs)
 
 
 def generate_c_type_stub(
@@ -500,6 +527,7 @@ def generate_c_type_stub(
     required names will be added to 'imports'.
     """
     raw_lookup = getattr(obj, "__dict__")  # noqa: B009
+    class_docstring = getattr(obj, "__doc__", None)
     items = sorted(get_members(obj), key=lambda x: method_name_sort_key(x[0]))
     names = {x[0] for x in items}
     methods: list[str] = []
@@ -592,6 +620,8 @@ def generate_c_type_stub(
         bases_str = ""
     if types or static_properties or rw_properties or methods or ro_properties:
         output.append(f"class {class_name}{bases_str}:")
+        if class_docstring is not None and len(class_docstring) > 0:
+            output.extend(convert_docstring_to_comment(class_docstring))
         for line in types:
             if (
                 output
@@ -610,7 +640,10 @@ def generate_c_type_stub(
         for line in ro_properties:
             output.append(f"    {line}")
     else:
-        output.append(f"class {class_name}{bases_str}: ...")
+        output.append(f"class {class_name}{bases_str}:")
+        if class_docstring is not None and len(class_docstring) > 0:
+            output.extend(convert_docstring_to_comment(class_docstring))
+        output.append("    ...")
 
 
 def get_type_fullname(typ: type) -> str:

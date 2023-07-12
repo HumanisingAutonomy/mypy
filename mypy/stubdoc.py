@@ -55,12 +55,17 @@ class ArgSig:
             )
         return False
 
+    def __str__(self) -> str:
+        return f"{self.name}: {self.type}"
 
 class FunctionSig(NamedTuple):
     name: str
     args: list[ArgSig]
     ret_type: str
+    docstring: str = ""
 
+    def __str__(self) -> str:
+        return f"{self.name}({','.join(str(self.args))}) -> {self.ret_type}"
 
 # States of the docstring parser.
 STATE_INIT: Final = 1
@@ -86,11 +91,16 @@ class DocStringParser:
         self.ret_type = "Any"
         self.found = False
         self.args: list[ArgSig] = []
+        self.docs = []
+        self.lines = []
         # Valid signatures found so far.
         self.signatures: list[FunctionSig] = []
 
     def add_token(self, token: tokenize.TokenInfo) -> None:
         """Process next token from the token stream."""
+        # don't parse c++ types in docstring
+        if "::" in token.line:
+            return
         if (
             token.type == tokenize.NAME
             and token.string == self.function_name
@@ -213,6 +223,8 @@ class DocStringParser:
                 self.signatures.append(
                     FunctionSig(name=self.function_name, args=self.args, ret_type=self.ret_type)
                 )
+                self.lines.append(self.docs)
+                self.docs = []
                 self.found = False
             self.args = []
             self.ret_type = "Any"
@@ -226,7 +238,8 @@ class DocStringParser:
         self.found = False
         self.accumulator = ""
 
-    def get_signatures(self) -> list[FunctionSig]:
+    @classmethod
+    def sort_signatures(cls, signatures: list[FunctionSig]) -> list[FunctionSig]:
         """Return sorted copy of the list of signatures found so far."""
 
         def has_arg(name: str, signature: FunctionSig) -> bool:
@@ -236,7 +249,11 @@ class DocStringParser:
             return has_arg("*args", signature) and has_arg("**kwargs", signature)
 
         # Move functions with (*args, **kwargs) in their signature to last place.
-        return list(sorted(self.signatures, key=lambda x: 1 if args_kwargs(x) else 0))
+        return list(sorted(signatures, key=lambda x: 1 if args_kwargs(x) else 0))
+
+    def get_signatures(self) -> list[FunctionSig]:
+        """Return sorted copy of the list of signatures found so far."""
+        return self.signatures[:]
 
 
 def infer_sig_from_docstring(docstr: str | None, name: str) -> list[FunctionSig] | None:
@@ -266,11 +283,38 @@ def infer_sig_from_docstring(docstr: str | None, name: str) -> list[FunctionSig]
                 state.add_token(token)
         except IndentationError:
             return None
+    
     sigs = state.get_signatures()
+
+    # if sigs:
+    #     lines = docstr.split("\n")
+    #     cur_doc = 0
+    #     func_docs = [[] for _ in range(len(sigs))]
+    #     cur_docs = []
+
+    #     for i in range(len(lines)):
+    #         has_args = all([arg.name in lines[i] for arg in sigs[cur_doc].args])
+    #         has_name = sigs[cur_doc].name in lines[i]
+    #         if has_args and has_name:
+    #             cur_doc += 1
+    #             if cur_doc >= len(sigs):
+    #                 func_docs[cur_doc - 1].extend(lines[i+1:])
+    #                 break
+    #             elif cur_doc - 2 >= 0:
+    #                 func_docs[cur_doc - 2].extend(cur_docs)
+    #             cur_docs = []
+    #         else:
+    #             cur_docs.append(lines[i])
+    
+    #     sigs = [sig._replace(docstring="\n".join(doc).strip("\n")) for doc, sig in zip(func_docs, sigs)]
+    sigs = DocStringParser.sort_signatures(sigs)
 
     def is_unique_args(sig: FunctionSig) -> bool:
         """return true if function argument names are unique"""
         return len(sig.args) == len({arg.name for arg in sig.args})
+
+    if sigs and sigs[0].name == "project":
+        a = 10
 
     # Return only signatures that have unique argument names. Mypy fails on non-unique arg names.
     return [sig for sig in sigs if is_unique_args(sig)]
